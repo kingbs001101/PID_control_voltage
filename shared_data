@@ -1,0 +1,169 @@
+import nidaqmx
+import matplotlib.pyplot as plt
+import time
+import multiprocessing
+import os
+import openpyxl
+import csv
+
+# PID Controller Parameters
+Kp = 0.01 # Proportional gain
+Ki = 0.1# Integral gain
+Kd = 0.000001 # Derivative gain
+
+def output_ao1() : 
+    with nidaqmx.Task() as task:
+        task.ao_channels.add_ao_voltage_chan("Dev1/ao1")
+
+        start_time_1 = time.time()
+        while time.time() - start_time_1 <2 : 
+
+            task.write([0.0], auto_start=True)
+
+        while True :     
+            task.write([1.0], auto_start=True)
+
+def output(control_signal):
+    
+    with nidaqmx.Task() as task:
+        task.ao_channels.add_ao_voltage_chan("Dev1/ao0")
+
+        task.write([control_signal], auto_start=True)
+
+def pid_control(setpoint, current_value, integral_sum, prev_error):
+    error = setpoint - current_value
+    integral_sum += error
+    derivative = error - prev_error
+
+    # 실제 Ki 부분은 시간으로 나눠야 미분 오차변화율이 된다.
+    # derivative = (error - prev_error) / time_interval
+
+    control_signal = Kp * error + Ki * integral_sum + Kd * derivative
+
+    prev_error = error
+
+    return control_signal, integral_sum, prev_error
+
+def read_ai0_voltage(shared_data, lock):
+
+    integral_sum = 0
+    prev_error = 0
+
+    with nidaqmx.Task() as task_ai0, nidaqmx.Task() as task_ai1:
+        task_ai0.ai_channels.add_ai_voltage_chan("Dev1/ai0")
+        task_ai1.ai_channels.add_ai_voltage_chan("Dev1/ai1")
+        
+        start_time_1 = time.time()
+        while True:
+            voltage_ai0 = task_ai0.read()
+            voltage_ai1 = task_ai1.read()
+            
+            timestamp = time.time() - start_time_1 # log the current time
+            control_signal, integral_sum, prev_error = pid_control(voltage_ai1, voltage_ai0, integral_sum, prev_error)
+            
+            # pid로 전압 출력 제어
+            output(control_signal)
+            with lock:
+                shared_data[0] = timestamp
+                shared_data[1] = voltage_ai0
+                shared_data[2] = voltage_ai1
+            time.sleep(0.001)
+
+def plot_ai0_data(shared_data, lock):
+
+    Data_ai0 = []
+    Data_ai1 = []
+
+    Time_stamps = [] # create a list to store times
+    fig, ax_ai0 = plt.subplots()
+    ax_ai0.set_xlabel('time')
+    ax_ai0.set_ylabel('voltage')
+    ax_ai0.set_title('Voltage - AI0')
+
+    start_time = time.time()
+
+    while time.time()-start_time<10:
+
+        start_time_2 = time.time()
+
+        with lock:
+            timestamp = shared_data[0]
+            voltage_ai0 = shared_data[1]
+            voltage_ai1 = shared_data[2]
+
+            Time_stamps.append(timestamp) # save time
+            Data_ai0.append(voltage_ai0)
+            Data_ai1.append(voltage_ai1)
+
+            ax_ai0.clear() # Clear before redrawing the graph
+            ax_ai0.plot(Time_stamps, Data_ai0, color='red', label='AI0') # Use time for x-axis
+            ax_ai0.plot(Time_stamps, Data_ai1, color='black', label='AI1') # Use time for x-axis
+
+            ax_ai0.set_xlim(0, 10) # Set x-axis limits
+            ax_ai0.legend()
+
+            plt.pause(0.01)
+
+        print(time.time() - start_time_2)
+
+        if not plt.fignum_exists(fig.number):
+            break
+
+    print(len(Data_ai0))
+
+def csv_writer(shared_data, filename, lock):
+    while True:
+        timestamp = shared_data[0]
+        voltage_ai0 = shared_data[1]
+        voltage_ai1 = shared_data[2]
+
+        with lock:
+            with open(filename, 'a', newline='') as csvfile:
+                csv_writer = csv.writer(csvfile)
+                csv_writer.writerow([timestamp, voltage_ai0,voltage_ai1])
+        time.sleep(0.001)
+
+if __name__ == "__main__":
+    shared_data = multiprocessing.Array('d', 3)  # Create a shared array for timestamp and voltage
+    lock = multiprocessing.Lock()
+
+    excel_filename = 'pid_control_0904_0242.csv'
+    excel_directory = r'C:\Users\USER\Desktop\about Python\excel_data'
+    full_path = os.path.join(excel_directory, excel_filename)
+
+    process_1 = multiprocessing.Process(target=read_ai0_voltage, args=(shared_data, lock))
+    process_2 = multiprocessing.Process(target=plot_ai0_data, args=(shared_data, lock))
+    process_3 = multiprocessing.Process(target=csv_writer, args=(shared_data, full_path, lock))
+
+    #  추가된 것 
+    process_4 = multiprocessing.Process(target=output_ao1, args=())
+    process_5 = multiprocessing.Process(target=output, args=(0.0,))
+
+    process_1.start()
+    process_2.start()
+    process_3.start()
+    process_4.start()
+    process_5.start()
+
+    process_2.join()
+
+    if not process_2.is_alive():
+        process_1.terminate()
+        process_3.terminate()
+        process_4.terminate()
+        process_5.terminate()
+
+        process_1.join()
+        process_3.join()
+        process_4.join()
+        process_5.join()
+
+
+        print("All processes have finished.\n******************************************")
+
+    with nidaqmx.Task() as task_ao0, nidaqmx.Task() as task_ao1:
+            task_ao0.ao_channels.add_ao_voltage_chan("Dev1/ao0")
+            task_ao1.ao_channels.add_ao_voltage_chan("Dev1/ao0")
+
+            task_ao0.write([0])
+            task_ao1.write([1]) 
